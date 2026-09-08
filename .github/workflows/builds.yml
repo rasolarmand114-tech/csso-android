@@ -18,7 +18,7 @@ jobs:
         run: |
           sudo apt update -y
           sudo apt install -y \
-            astc-encoder
+            astcenc libastcenc-dev
 
       - name: Build android-aarch64
         run: |
