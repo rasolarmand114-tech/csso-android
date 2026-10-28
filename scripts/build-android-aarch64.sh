@@ -77,8 +77,6 @@ if [ ! -x "${LLVM_DIR}/bin/clang" ]; then
         -C "${LLVM_DIR}"
 fi
 
-export PATH="${LLVM_DIR}/bin:${PATH}"
-
 CLANG="${LLVM_DIR}/bin/clang"
 CLANGXX="${LLVM_DIR}/bin/clang++"
 LLD="${LLVM_DIR}/bin/ld.lld"
@@ -123,24 +121,28 @@ if [ ! -d "${ANDROID_GCC_TOOLCHAIN}" ]; then
 fi
 
 ###############################################################################
-# LLVM libc++
+# ASTCENC libc++
+#
+# IMPORTANT:
+# This libc++ is ONLY for ASTCENC.
+# It is deliberately NOT exported to Waf.
 ###############################################################################
 
 echo
 echo "========================================"
-echo " LLVM libc++"
+echo " LLVM libc++ for ASTCENC"
 echo "========================================"
 
-LIBCXX_INCLUDE="${LLVM_DIR}/include/c++/v1"
+ASTC_LIBCXX_INCLUDE="${LLVM_DIR}/include/c++/v1"
 
-if [ ! -d "${LIBCXX_INCLUDE}" ]; then
+if [ ! -d "${ASTC_LIBCXX_INCLUDE}" ]; then
     echo "ERROR: LLVM libc++ headers not found:"
-    echo "  ${LIBCXX_INCLUDE}"
+    echo "  ${ASTC_LIBCXX_INCLUDE}"
     exit 1
 fi
 
-echo "libc++:"
-echo "  ${LIBCXX_INCLUDE}"
+echo "ASTCENC libc++:"
+echo "  ${ASTC_LIBCXX_INCLUDE}"
 
 ###############################################################################
 # Clone ASTC Encoder 4.8.0
@@ -180,18 +182,21 @@ mkdir -p "${ASTCENC_BUILD}"
 mkdir -p "${ASTCENC_INSTALL}/include"
 mkdir -p "${ASTCENC_INSTALL}/lib"
 
-COMMON_FLAGS="\
+# IMPORTANT:
+# These variables are shell-local and are NOT exported.
+# Therefore they cannot leak into Waf.
+ASTC_COMMON_FLAGS="\
 --target=${ANDROID_TARGET} \
 --sysroot=${ANDROID_SYSROOT} \
 --gcc-toolchain=${ANDROID_GCC_TOOLCHAIN}"
 
-CFLAGS="${COMMON_FLAGS}"
+ASTC_CFLAGS="${ASTC_COMMON_FLAGS}"
 
-CXXFLAGS="${COMMON_FLAGS} \
--isystem${LIBCXX_INCLUDE} \
+ASTC_CXXFLAGS="${ASTC_COMMON_FLAGS} \
+-isystem${ASTC_LIBCXX_INCLUDE} \
 -stdlib=libc++"
 
-LDFLAGS="${COMMON_FLAGS} \
+ASTC_LDFLAGS="${ASTC_COMMON_FLAGS} \
 -fuse-ld=lld"
 
 cmake \
@@ -201,16 +206,17 @@ cmake \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER="${CLANG}" \
     -DCMAKE_CXX_COMPILER="${CLANGXX}" \
-    -DCMAKE_C_FLAGS="${CFLAGS}" \
-    -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
-    -DCMAKE_EXE_LINKER_FLAGS="${LDFLAGS}" \
-    -DCMAKE_SHARED_LINKER_FLAGS="${LDFLAGS}" \
-    -DCMAKE_MODULE_LINKER_FLAGS="${LDFLAGS}" \
+    -DCMAKE_C_FLAGS="${ASTC_CFLAGS}" \
+    -DCMAKE_CXX_FLAGS="${ASTC_CXXFLAGS}" \
+    -DCMAKE_EXE_LINKER_FLAGS="${ASTC_LDFLAGS}" \
+    -DCMAKE_SHARED_LINKER_FLAGS="${ASTC_LDFLAGS}" \
+    -DCMAKE_MODULE_LINKER_FLAGS="${ASTC_LDFLAGS}" \
     -DCMAKE_AR="${LLVM_AR}" \
     -DCMAKE_RANLIB="${LLVM_RANLIB}" \
     -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
     -DCMAKE_CXX_STANDARD=11 \
     -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DASTCENC_ISA_AVX2=OFF \
     -DASTCENC_ISA_SSE41=OFF \
     -DASTCENC_ISA_SSE2=OFF \
@@ -231,7 +237,7 @@ cmake --build "${ASTCENC_BUILD}" \
     --parallel "$(nproc)"
 
 ###############################################################################
-# Install ASTC Encoder files
+# Install ASTC Encoder
 ###############################################################################
 
 echo
@@ -289,8 +295,53 @@ fi
 
 ###############################################################################
 # IMPORTANT:
-# GitHub Actions pre-exports a modern Android NDK.
-# Waf must use our downloaded NDK r10e instead.
+# ASTCENC compiler environment ENDS HERE.
+#
+# Nothing from ASTCENC's compiler flags is allowed to leak into Waf.
+###############################################################################
+
+echo
+echo "========================================"
+echo " Reset compiler environment"
+echo "========================================"
+
+unset CC
+unset CXX
+unset CPP
+unset AR
+unset AS
+unset LD
+unset RANLIB
+unset STRIP
+unset OBJC
+unset OBJCXX
+
+unset CFLAGS
+unset CXXFLAGS
+unset CPPFLAGS
+unset LDFLAGS
+
+unset SYSROOT
+unset CMAKE_C_COMPILER
+unset CMAKE_CXX_COMPILER
+unset CMAKE_C_FLAGS
+unset CMAKE_CXX_FLAGS
+unset CMAKE_EXE_LINKER_FLAGS
+unset CMAKE_SHARED_LINKER_FLAGS
+unset CMAKE_MODULE_LINKER_FLAGS
+
+unset CMAKE_TOOLCHAIN_FILE
+unset CMAKE_ANDROID_NDK
+unset CMAKE_ANDROID_NDK_VERSION
+unset CMAKE_ANDROID_ARCH_ABI
+unset CMAKE_ANDROID_API
+
+###############################################################################
+# Waf environment
+#
+# IMPORTANT:
+# Waf uses Android NDK r10e libc++.
+# Do NOT use LLVM_DIR/include/c++/v1 here.
 ###############################################################################
 
 echo
@@ -300,28 +351,77 @@ echo "========================================"
 
 chmod +x waf
 
-# Remove GitHub Actions / environment-provided modern NDK variables.
+# Remove GitHub Actions / externally supplied modern NDK variables.
 unset ANDROID_NDK
 unset ANDROID_NDK_HOME
 unset ANDROID_NDK_ROOT
 unset ANDROID_NDK_LATEST_HOME
 
-unset CMAKE_TOOLCHAIN_FILE
-unset CMAKE_ANDROID_NDK
-unset CMAKE_ANDROID_NDK_VERSION
-unset CMAKE_ANDROID_ARCH_ABI
-unset CMAKE_ANDROID_API
-
-# Force Waf to use Android NDK r10e.
+# Waf must use our downloaded NDK r10e.
 export ANDROID_NDK="${NDK}"
 export ANDROID_NDK_HOME="${NDK}"
 export ANDROID_NDK_ROOT="${NDK}"
-
-# Also expose the old NDK name in case the Waf script checks NDK_HOME.
 export NDK_HOME="${NDK}"
 
-# Make sure our LLVM comes first.
-export PATH="${LLVM_DIR}/bin:${ANDROID_GCC_TOOLCHAIN}/bin:${PATH}"
+###############################################################################
+# NDK r10e libc++
+###############################################################################
+
+WAF_LIBCXX_INCLUDE="${NDK}/sources/cxx-stl/llvm-libc++/libcxx/include"
+WAF_LIBCXXABI_INCLUDE="${NDK}/sources/cxx-stl/llvm-libc++abi/libcxxabi/include"
+WAF_ANDROID_SUPPORT_INCLUDE="${NDK}/sources/android/support/include"
+
+if [ ! -d "${WAF_LIBCXX_INCLUDE}" ]; then
+    echo "ERROR: NDK r10e libc++ headers not found:"
+    echo "  ${WAF_LIBCXX_INCLUDE}"
+    exit 1
+fi
+
+if [ ! -d "${WAF_LIBCXXABI_INCLUDE}" ]; then
+    echo "ERROR: NDK r10e libc++abi headers not found:"
+    echo "  ${WAF_LIBCXXABI_INCLUDE}"
+    exit 1
+fi
+
+if [ ! -d "${WAF_ANDROID_SUPPORT_INCLUDE}" ]; then
+    echo "ERROR: Android support headers not found:"
+    echo "  ${WAF_ANDROID_SUPPORT_INCLUDE}"
+    exit 1
+fi
+
+###############################################################################
+# Waf compiler tools
+###############################################################################
+
+# Keep LLVM 11 first.
+export PATH="${LLVM_DIR}/bin:${PATH}"
+
+# Make llvm-strip executable as requested.
+chmod +x "${LLVM_DIR}/bin/llvm-strip"
+
+###############################################################################
+# Waf C/C++ flags
+#
+# These are Waf-only flags.
+# They are created AFTER the ASTCENC environment was completely reset.
+#
+# The critical part for the '<new>' error is the NDK r10e libc++ include.
+###############################################################################
+
+export CFLAGS="-O2 \
+-isystem${WAF_ANDROID_SUPPORT_INCLUDE}"
+
+export CXXFLAGS="-O2 \
+-stdlib=libc++ \
+-isystem${WAF_LIBCXX_INCLUDE} \
+-isystem${WAF_LIBCXXABI_INCLUDE} \
+-isystem${WAF_ANDROID_SUPPORT_INCLUDE}"
+
+export LDFLAGS="-s -flto"
+
+###############################################################################
+# Waf environment information
+###############################################################################
 
 echo
 echo "Waf Android environment:"
@@ -330,6 +430,18 @@ echo "  ANDROID_NDK_HOME = ${ANDROID_NDK_HOME}"
 echo "  ANDROID_NDK_ROOT = ${ANDROID_NDK_ROOT}"
 echo "  NDK_HOME         = ${NDK_HOME}"
 echo "  ASTCENC_ROOT     = ${ASTCENC_ROOT}"
+
+echo
+echo "Waf LLVM:"
+echo "  LLVM_DIR         = ${LLVM_DIR}"
+echo "  clang            = ${CLANG}"
+echo "  clang++          = ${CLANGXX}"
+
+echo
+echo "Waf libc++:"
+echo "  libc++           = ${WAF_LIBCXX_INCLUDE}"
+echo "  libc++abi        = ${WAF_LIBCXXABI_INCLUDE}"
+echo "  Android support  = ${WAF_ANDROID_SUPPORT_INCLUDE}"
 
 if [ "${ANDROID_NDK}" != "${NDK}" ]; then
     echo
@@ -342,17 +454,13 @@ if [ "${ANDROID_NDK}" != "${NDK}" ]; then
 fi
 
 ###############################################################################
-# Waf build
+# Waf configure
 ###############################################################################
 
 echo
 echo "========================================"
 echo " Waf configure"
 echo "========================================"
-
-export CFLAGS="-O2"
-export CXXFLAGS="-O2"
-export LDFLAGS="-s -flto"
 
 ./waf configure \
     -T release \
@@ -362,6 +470,10 @@ export LDFLAGS="-s -flto"
     --prefix=./output \
     --disable-warns
 
+###############################################################################
+# Waf build
+###############################################################################
+
 echo
 echo "========================================"
 echo " Waf build"
@@ -369,12 +481,20 @@ echo "========================================"
 
 ./waf build
 
+###############################################################################
+# Waf install
+###############################################################################
+
 echo
 echo "========================================"
 echo " Waf install"
 echo "========================================"
 
 ./waf install
+
+###############################################################################
+# Success
+###############################################################################
 
 echo
 echo "========================================"

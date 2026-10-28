@@ -43,8 +43,7 @@ def configure(conf):
 	#   └── lib/
 	#       └── libastcenc-neon-static.a
 	#
-	# For Android AArch64 we intentionally use the NEON static
-	# library produced by ASTC Encoder.
+	# For Android AArch64 we use the NEON static library.
 	#
 
 	astcenc_root = os.environ.get('ASTCENC_ROOT')
@@ -78,8 +77,29 @@ def configure(conf):
 	)
 
 	# ------------------------------------------------------------
-	# Verify ASTCENC files
+	# Verify ASTCENC installation
 	# ------------------------------------------------------------
+	#
+	# Do this directly instead of using check_cc().
+	#
+	# The ASTCENC library has already been built for the target
+	# platform by the CI script, so another compiler probe here
+	# is unnecessary and causes problems with this old Waf setup.
+	#
+
+	if not os.path.isdir(astcenc_include):
+		conf.fatal(
+			'ASTCENC include directory not found:\n'
+			'  %s'
+			% astcenc_include
+		)
+
+	if not os.path.isdir(astcenc_lib):
+		conf.fatal(
+			'ASTCENC library directory not found:\n'
+			'  %s'
+			% astcenc_lib
+		)
 
 	if not os.path.isfile(astcenc_header):
 		conf.fatal(
@@ -109,14 +129,7 @@ def configure(conf):
 		astcenc_lib
 	]
 
-	# IMPORTANT:
-	#
-	# Waf expects the library name WITHOUT:
-	#
-	#   lib
-	#   .a
-	#
-	# Therefore:
+	# Waf library name:
 	#
 	#   libastcenc-neon-static.a
 	#
@@ -130,26 +143,7 @@ def configure(conf):
 	]
 
 	# ------------------------------------------------------------
-	# Verify ASTCENC header with the actual target compiler
-	# ------------------------------------------------------------
-	#
-	# Do not use check_cc(lib=...) here.
-	#
-	# We already verified the exact archive above and manually
-	# provide the library to the target through LIB_ASTCENC.
-	#
-	# The header check is still useful because it verifies that
-	# the target compiler can actually include astcenc.h.
-	#
-
-	conf.check_cc(
-		header_name='astcenc.h',
-		includes=conf.env.INCLUDES_ASTCENC,
-		mandatory=True
-	)
-
-	# ------------------------------------------------------------
-	# ASTCENC information
+	# Print ASTCENC configuration
 	# ------------------------------------------------------------
 
 	conf.msg(
@@ -161,6 +155,56 @@ def configure(conf):
 		'ASTCENC library',
 		astcenc_library
 	)
+
+	conf.msg(
+		'ASTCENC support',
+		'enabled'
+	)
+
+	# ------------------------------------------------------------
+	# Android: libc++ runtime
+	# ------------------------------------------------------------
+	#
+	# On Android targets clang compiles against libc++ headers (std::__1),
+	# both for this module and for the prebuilt astcenc archive. The link
+	# line, however, uses -stdlib=libstdc++, so the out-of-line libc++
+	# symbols (std::__1::mutex, condition_variable, thread,
+	# bad_function_call, RTTI vtables ...) are never linked and libtogl.so
+	# fails with "undefined symbol: std::__1::mutex::lock()".
+	#
+	# Link the NDK's static libc++ explicitly. It also carries the C++ ABI
+	# bits (gabi++), which fixes the runtime dlopen error about
+	# _ZTVN10__cxxabiv117__class_type_infoE.
+
+	if conf.env.DEST_OS == 'android':
+		ndk = (os.environ.get('ANDROID_NDK')
+			or os.environ.get('ANDROID_NDK_HOME')
+			or os.environ.get('NDK_HOME'))
+
+		if not ndk:
+			conf.fatal('ANDROID_NDK is required to locate libc++_static.a')
+
+		libcxx_dir = os.path.join(
+			ndk,
+			'sources', 'cxx-stl', 'llvm-libc++', 'libs', 'arm64-v8a'
+		)
+
+		if not os.path.isfile(os.path.join(libcxx_dir, 'libc++_static.a')):
+			conf.fatal('libc++_static.a not found in %s' % libcxx_dir)
+
+		conf.env.STLIBPATH_LIBCXX = [libcxx_dir]
+		conf.env.STLIB_LIBCXX = ['c++_static']
+		conf.msg('Android libc++ runtime', libcxx_dir)
+        # One STL per module: drop gnustl, libc++ is the only C++ runtime
+		# linked into the Android build.
+		for key in list(conf.env.keys()):
+			val = conf.env[key]
+			if isinstance(val, list):
+				conf.env[key] = [
+					v for v in val
+					if not (isinstance(v, str) and
+						('gnustl' in v or 'gnu-libstdc++' in v))
+				]
 
 
 def build(bld):
@@ -183,6 +227,12 @@ def build(bld):
 		'linuxwin/asanstubs.cpp',
 		'linuxwin/decompress.c',
 		'linuxwin/astc_texcompress.cpp',
+
+		# Mali (ARM GPU) optimizations: program binary cache, glInvalidateFramebuffer, occlusion query target.
+		# The AArch64 NEON kernels live in the header linuxwin/arm_neon_opt.h (used by decompress.c,
+		# astc_texcompress.cpp and cglmtex.cpp). Add 'TOGL_DISABLE_ARM_NEON=1' to the defines to build the
+		# scalar code paths only.
+		'linuxwin/mali_opt.cpp',
 	]
 
 	if bld.env.DEST_OS == "darwin":
@@ -190,12 +240,25 @@ def build(bld):
 			'linuxwin/glmgrcocoa.mm'
 		]
 
+	# ------------------------------------------------------------
+	# Include paths
+	# ------------------------------------------------------------
+
 	includes = [
 		'.',
 		'../public',
 		'../public/tier0',
 		'../public/tier1',
-	] + bld.env.INCLUDES_SDL2
+	]
+
+	includes += bld.env.INCLUDES_SDL2
+
+	# ASTCENC is mandatory.
+	#
+	# Add it explicitly instead of relying on uselib propagation.
+	#
+
+	includes += bld.env.INCLUDES_ASTCENC
 
 	# ------------------------------------------------------------
 	# Defines
@@ -211,7 +274,7 @@ def build(bld):
 	#
 	# ASTCENC is REQUIRED.
 	#
-	# Never make ASTCENC conditional.
+	# NEVER make this conditional.
 	#
 
 	libs = [
@@ -222,6 +285,12 @@ def build(bld):
 		'mathlib',
 		'ASTCENC',
 	]
+
+	# Must come after ASTCENC: the static archive resolves its libc++ refs.
+	if bld.env.DEST_OS == "android":
+		libs += [
+			'LIBCXX',
+		]
 
 	if bld.env.DEST_OS == "darwin":
 		libs += [
